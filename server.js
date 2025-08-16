@@ -14,8 +14,30 @@ const driverRoutes = require("./routes/driverRoute");
 dotenv.config();
 const app = express();
 
+// CORS Configuration
+const allowedOrigins = [
+  'http://localhost:5173', // Local development
+  // Add your production frontend URL when deployed
+];
+
+app.use(cors({
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.warn(`Blocked by CORS: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 // Middlewares
-app.use(cors());
 app.use(express.json());
 
 // API Endpoints
@@ -27,7 +49,18 @@ app.use("/driver", driverRoutes);
 // MongoDB connection
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log(" MongoDB Connected"))
-  .catch(err => console.error("MongoDB Connection Error:", err));
+  .catch(err => {
+    console.error("MongoDB Connection Error:", err);
+    process.exit(1); // Exit if DB connection fails
+  });
+
+// Health Check Route
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "healthy",
+    dbState: mongoose.connection.readyState === 1 ? "connected" : "disconnected"
+  });
+});
 
 // Root Route
 app.get("/", (req, res) => {
@@ -38,9 +71,13 @@ app.get("/", (req, res) => {
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: ['http://localhost:5173','https://coconut-tender-backend.onrender.com'],
-    methods: ["GET", "POST", "PUT"],
+    origin: allowedOrigins, // Reuse the same CORS origins
+    methods: ["GET", "POST", "PUT", "DELETE"],
     credentials: true
+  },
+  connectionStateRecovery: {
+    maxDisconnectionDuration: 2 * 60 * 1000, // 2 minutes
+    skipMiddlewares: true
   }
 });
 
@@ -51,58 +88,36 @@ app.set("io", io);
 const socketUsers = {};
 global.socketUsers = socketUsers;
 
-// Socket.IO logic
+// Socket.IO logic with improved error handling
 io.on("connection", (socket) => {
-  console.log(" New client connected:", socket.id);
+  console.log(`New client connected: ${socket.id} from ${socket.handshake.headers.origin}`);
 
-  // Debug all events
   socket.onAny((event, payload) => {
     console.log(`Event received: ${event}`, payload);
   });
 
-  // Register client to rooms
   socket.on("joinRoom", (data) => {
-    let userId, role;
-
-    // Safely parse payload (string or object)
-    if (typeof data === "string") {
-      try {
-        const parsed = JSON.parse(data);
-        userId = parsed.userId;
-        role = parsed.role;
-      } catch (err) {
-        console.error(" Failed to parse joinRoom payload:", data);
-        return;
+    try {
+      const { userId, role } = typeof data === "string" ? JSON.parse(data) : data;
+      
+      if (!userId || !role) {
+        throw new Error("Missing userId or role");
       }
-    } else {
-      userId = data.userId;
-      role = data.role;
-    }
 
-    if (!userId || !role) {
-      console.warn(" Missing userId or role in joinRoom payload");
-      return;
+      const room = role === "admin" ? "admin" : `${role}:${userId}`;
+      socket.join(room);
+      socketUsers[userId] = socket.id;
+      
+      console.log(`${role} ${userId} joined room ${room}`);
+    } catch (err) {
+      console.error("JoinRoom error:", err.message);
+      socket.emit("error", { message: "Invalid joinRoom request" });
     }
-
-    if (role === "admin") {
-      socket.join("admin");
-      console.log(` Admin ${userId} joined room 'admin'`);
-    } else if (role === "vendor") {
-      socket.join(`vendor:${userId}`);
-      console.log(` Vendor ${userId} joined room vendor:${userId}`);
-    } else if (role === "driver") {
-      socket.join(`driver:${userId}`);
-      console.log(` Driver ${userId} joined room driver:${userId}`);
-    }
-
-    // Track socket ID
-    socketUsers[userId] = socket.id;
   });
 
-  // Handle disconnect
-  socket.on("disconnect", () => {
-    console.log(" Client disconnected:", socket.id);
-
+  socket.on("disconnect", (reason) => {
+    console.log(`Client disconnected (${reason}): ${socket.id}`);
+    
     for (const [userId, sockId] of Object.entries(socketUsers)) {
       if (sockId === socket.id) {
         delete socketUsers[userId];
@@ -110,8 +125,21 @@ io.on("connection", (socket) => {
       }
     }
   });
+
+  socket.on("error", (err) => {
+    console.error(`Socket error (${socket.id}):`, err);
+  });
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).send('Something broke!');
 });
 
 // Start server
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => console.log(` Server running on port ${PORT}`));
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Allowed CORS origins: ${allowedOrigins.join(', ')}`);
+});
