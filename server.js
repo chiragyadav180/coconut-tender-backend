@@ -17,7 +17,7 @@ const app = express();
 // CORS Configuration
 const allowedOrigins = [
   'http://localhost:5173',
-  'https://extraordinary-alfajores-ca0785.netlify.app'
+  'https://storied-cendol-0d74fc.netlify.app'
 ];
 
 app.use(cors({
